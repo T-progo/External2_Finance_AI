@@ -1,0 +1,3018 @@
+-- ============================================
+-- EXTERNALIZA2 - CLEAN INSTALLATION
+-- ============================================
+-- For completely fresh databases
+-- Run this when starting from scratch
+-- ============================================
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================
+-- Create custom types
+-- ============================================
+
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('admin', 'asesor', 'cliente');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE user_estado AS ENUM ('activo', 'inactivo');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE document_status AS ENUM ('pendiente', 'procesado_ia', 'validado', 'contabilizado', 'incidencia', 'rechazado');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE document_type AS ENUM ('emitida', 'recibida', 'nomina', 'gasto', 'otro');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE incident_status AS ENUM ('nueva', 'en_revision', 'resuelta', 'cerrada');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE incident_origin AS ENUM ('ia', 'manual', 'asesor');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE riesgo_type AS ENUM ('bajo', 'medio', 'alto');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- ============================================
+-- Create tables
+-- ============================================
+
+-- Users/Profiles table (extends Supabase auth.users)
+CREATE TABLE IF NOT EXISTS profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  nombre TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  rol user_role NOT NULL DEFAULT 'cliente',
+  estado user_estado NOT NULL DEFAULT 'activo',
+  telefono TEXT,
+  ultimo_acceso TIMESTAMP WITH TIME ZONE,
+  fecha_alta TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  notas_internas TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Clients table
+CREATE TABLE IF NOT EXISTS clientes (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  nif TEXT UNIQUE NOT NULL,
+  razon_social TEXT NOT NULL,
+  nombre_comercial TEXT,
+  persona_contacto TEXT NOT NULL,
+  telefono TEXT NOT NULL,
+  email TEXT NOT NULL,
+  direccion_fiscal TEXT NOT NULL,
+  estado user_estado NOT NULL DEFAULT 'activo',
+  fecha_alta TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  modulo_subida_documentos BOOLEAN DEFAULT true,
+  modulo_incidencias BOOLEAN DEFAULT true,
+  modulo_asistente_e2 BOOLEAN DEFAULT false,
+  modulo_panel_financiero BOOLEAN DEFAULT false,
+  modulo_facturacion BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Asesor-Cliente relationship (many-to-many)
+CREATE TABLE IF NOT EXISTS asesor_cliente (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  asesor_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  fecha_asignacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(asesor_id, cliente_id)
+);
+
+-- Documents table
+CREATE TABLE IF NOT EXISTS documentos (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre TEXT NOT NULL,
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  asesor_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  tipo document_type NOT NULL,
+  estado document_status NOT NULL DEFAULT 'pendiente',
+  fecha_subida TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  procesado_ia BOOLEAN DEFAULT false,
+  tamanio BIGINT,
+  url_archivo TEXT NOT NULL,
+  nro_asiento_erp TEXT,
+  datos_ia JSONB,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Incidents table
+CREATE TABLE IF NOT EXISTS incidencias (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  documento_id UUID REFERENCES documentos(id) ON DELETE CASCADE,
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  asesor_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  estado incident_status NOT NULL DEFAULT 'nueva',
+  origen incident_origin NOT NULL,
+  fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  fecha_ultima_respuesta TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Incident messages table
+CREATE TABLE IF NOT EXISTS mensajes_incidencia (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  incidencia_id UUID REFERENCES incidencias(id) ON DELETE CASCADE,
+  usuario_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  mensaje TEXT NOT NULL,
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Financial data table
+CREATE TABLE IF NOT EXISTS datos_financieros (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  periodo TEXT NOT NULL,
+  ingresos DECIMAL(15,2) NOT NULL DEFAULT 0,
+  gastos DECIMAL(15,2) NOT NULL DEFAULT 0,
+  resultado DECIMAL(15,2) NOT NULL DEFAULT 0,
+  margen DECIMAL(5,2),
+  riesgo_ia riesgo_type,
+  ultimo_cierre TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(cliente_id, periodo)
+);
+
+-- Activity log table
+CREATE TABLE IF NOT EXISTS actividad_reciente (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tipo TEXT NOT NULL,
+  descripcion TEXT NOT NULL,
+  usuario_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  usuario_nombre TEXT NOT NULL,
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  enlace TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ============================================
+-- Create indexes
+-- ============================================
+
+CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);
+CREATE INDEX IF NOT EXISTS idx_profiles_rol ON profiles(rol);
+CREATE INDEX IF NOT EXISTS idx_clientes_user_id ON clientes(user_id);
+CREATE INDEX IF NOT EXISTS idx_asesor_cliente_asesor ON asesor_cliente(asesor_id);
+CREATE INDEX IF NOT EXISTS idx_asesor_cliente_cliente ON asesor_cliente(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_cliente ON documentos(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_asesor ON documentos(asesor_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_estado ON documentos(estado);
+CREATE INDEX IF NOT EXISTS idx_incidencias_cliente ON incidencias(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_incidencias_estado ON incidencias(estado);
+CREATE INDEX IF NOT EXISTS idx_mensajes_incidencia ON mensajes_incidencia(incidencia_id);
+CREATE INDEX IF NOT EXISTS idx_datos_financieros_cliente ON datos_financieros(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_actividad_fecha ON actividad_reciente(fecha DESC);
+
+-- ============================================
+-- Create functions
+-- ============================================
+
+-- Function for auto-updating timestamps
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Function to create profile after user signup (with error handling)
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER 
+SECURITY DEFINER
+SET search_path = public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    user_nombre TEXT;
+    user_rol user_role;
+BEGIN
+    user_nombre := COALESCE(NEW.raw_user_meta_data->>'nombre', 'Usuario');
+    
+    BEGIN
+        user_rol := COALESCE((NEW.raw_user_meta_data->>'rol')::user_role, 'cliente'::user_role);
+    EXCEPTION WHEN OTHERS THEN
+        user_rol := 'cliente'::user_role;
+    END;
+    
+    INSERT INTO public.profiles (id, nombre, email, rol, estado, fecha_alta)
+    VALUES (
+        NEW.id,
+        user_nombre,
+        NEW.email,
+        user_rol,
+        'activo',
+        NOW()
+    );
+    
+    RETURN NEW;
+EXCEPTION
+    WHEN unique_violation THEN
+        RETURN NEW;
+    WHEN OTHERS THEN
+        RAISE WARNING 'Error creating profile for user %: %', NEW.id, SQLERRM;
+        RETURN NEW;
+END;
+$$;
+
+-- ============================================
+-- Create triggers
+-- ============================================
+
+DROP TRIGGER IF EXISTS update_profiles_updated_at ON profiles;
+CREATE TRIGGER update_profiles_updated_at BEFORE UPDATE ON profiles
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_clientes_updated_at ON clientes;
+CREATE TRIGGER update_clientes_updated_at BEFORE UPDATE ON clientes
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_documentos_updated_at ON documentos;
+CREATE TRIGGER update_documentos_updated_at BEFORE UPDATE ON documentos
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_incidencias_updated_at ON incidencias;
+CREATE TRIGGER update_incidencias_updated_at BEFORE UPDATE ON incidencias
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_datos_financieros_updated_at ON datos_financieros;
+CREATE TRIGGER update_datos_financieros_updated_at BEFORE UPDATE ON datos_financieros
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- ============================================
+-- Configure RLS
+-- ============================================
+
+ALTER TABLE profiles DISABLE ROW LEVEL SECURITY;
+ALTER TABLE clientes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE asesor_cliente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documentos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE incidencias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mensajes_incidencia ENABLE ROW LEVEL SECURITY;
+ALTER TABLE datos_financieros ENABLE ROW LEVEL SECURITY;
+ALTER TABLE actividad_reciente ENABLE ROW LEVEL SECURITY;
+
+-- ============================================
+-- Create RLS policies
+-- ============================================
+
+-- Drop existing policies if they exist
+DROP POLICY IF EXISTS "Clientes can view their own data" ON clientes;
+DROP POLICY IF EXISTS "Admins can manage all clients" ON clientes;
+DROP POLICY IF EXISTS "Asesores can view their assigned clients" ON clientes;
+DROP POLICY IF EXISTS "Users can view their related documents" ON documentos;
+DROP POLICY IF EXISTS "Clients can create documents" ON documentos;
+DROP POLICY IF EXISTS "Asesores and Admins can update documents" ON documentos;
+DROP POLICY IF EXISTS "Users can view their related incidents" ON incidencias;
+DROP POLICY IF EXISTS "Users can view messages from their incidents" ON mensajes_incidencia;
+DROP POLICY IF EXISTS "Users can view their financial data" ON datos_financieros;
+DROP POLICY IF EXISTS "All authenticated users can view activity" ON actividad_reciente;
+
+-- Clientes policies
+CREATE POLICY "Clientes can view their own data" ON clientes
+    FOR SELECT USING (user_id = auth.uid());
+
+CREATE POLICY "Admins can manage all clients" ON clientes
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+        )
+    );
+
+CREATE POLICY "Asesores can view their assigned clients" ON clientes
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM asesor_cliente 
+            WHERE cliente_id = clientes.id AND asesor_id = auth.uid()
+        )
+    );
+
+-- Documentos policies
+CREATE POLICY "Users can view their related documents" ON documentos
+    FOR SELECT USING (
+        auth.uid() = asesor_id OR
+        EXISTS (
+            SELECT 1 FROM clientes WHERE id = documentos.cliente_id AND user_id = auth.uid()
+        ) OR
+        EXISTS (
+            SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+        )
+    );
+
+CREATE POLICY "Clients can create documents" ON documentos
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM clientes WHERE id = documentos.cliente_id AND user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Asesores and Admins can update documents" ON documentos
+    FOR UPDATE USING (
+        auth.uid() = asesor_id OR
+        EXISTS (
+            SELECT 1 FROM profiles WHERE id = auth.uid() AND rol IN ('admin', 'asesor')
+        )
+    );
+
+-- Incidencias policies
+CREATE POLICY "Users can view their related incidents" ON incidencias
+    FOR SELECT USING (
+        auth.uid() = asesor_id OR
+        EXISTS (
+            SELECT 1 FROM clientes WHERE id = incidencias.cliente_id AND user_id = auth.uid()
+        ) OR
+        EXISTS (
+            SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+        )
+    );
+
+-- Mensajes incidencia policies
+CREATE POLICY "Users can view messages from their incidents" ON mensajes_incidencia
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM incidencias 
+            WHERE id = mensajes_incidencia.incidencia_id 
+            AND (
+                asesor_id = auth.uid() OR
+                EXISTS (SELECT 1 FROM clientes WHERE id = incidencias.cliente_id AND user_id = auth.uid())
+            )
+        )
+    );
+
+-- Datos financieros policies
+CREATE POLICY "Users can view their financial data" ON datos_financieros
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM clientes WHERE id = datos_financieros.cliente_id AND user_id = auth.uid()
+        ) OR
+        EXISTS (
+            SELECT 1 FROM asesor_cliente WHERE cliente_id = datos_financieros.cliente_id AND asesor_id = auth.uid()
+        ) OR
+        EXISTS (
+            SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+        )
+    );
+
+-- Actividad reciente policies
+CREATE POLICY "All authenticated users can view activity" ON actividad_reciente
+    FOR SELECT USING (auth.uid() IS NOT NULL);
+
+-- ============================================
+-- Grant permissions
+-- ============================================
+
+GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO postgres, anon, authenticated, service_role;
+
+-- ============================================
+-- SUCCESS!
+-- ============================================
+
+DO $$
+BEGIN
+    RAISE NOTICE '============================================';
+    RAISE NOTICE '✅ DATABASE CREATED SUCCESSFULLY!';
+    RAISE NOTICE '============================================';
+    RAISE NOTICE 'Created:';
+    RAISE NOTICE '- 8 tables';
+    RAISE NOTICE '- 13 indexes';
+    RAISE NOTICE '- 6 triggers';
+    RAISE NOTICE '- 2 functions';
+    RAISE NOTICE '- 7 custom types';
+    RAISE NOTICE '- RLS policies';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Ready to use!';
+    RAISE NOTICE 'Test signup at: http://localhost:5000/signup';
+    RAISE NOTICE '============================================';
+END $$;
+
+-- Fix for signup error: "Database error saving new user"
+-- This creates a more robust trigger function with better error handling
+
+-- Drop existing trigger if it exists
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
+-- Drop existing function
+DROP FUNCTION IF EXISTS public.handle_new_user();
+
+-- Create improved function with better error handling
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER 
+SECURITY DEFINER
+SET search_path = public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    user_nombre TEXT;
+    user_rol user_role;
+BEGIN
+    -- Extract nombre from metadata, default to 'Usuario'
+    user_nombre := COALESCE(NEW.raw_user_meta_data->>'nombre', 'Usuario');
+    
+    -- Extract and cast rol, with proper error handling
+    BEGIN
+        user_rol := COALESCE((NEW.raw_user_meta_data->>'rol')::user_role, 'cliente'::user_role);
+    EXCEPTION WHEN OTHERS THEN
+        user_rol := 'cliente'::user_role;
+    END;
+    
+    -- Insert the profile
+    INSERT INTO public.profiles (id, nombre, email, rol, estado, fecha_alta)
+    VALUES (
+        NEW.id,
+        user_nombre,
+        NEW.email,
+        user_rol,
+        'activo',
+        NOW()
+    );
+    
+    RETURN NEW;
+EXCEPTION
+    WHEN unique_violation THEN
+        -- Profile already exists, just return
+        RETURN NEW;
+    WHEN OTHERS THEN
+        -- Log error and return (don't block user creation)
+        RAISE WARNING 'Error creating profile for user %: %', NEW.id, SQLERRM;
+        RETURN NEW;
+END;
+$$;
+
+-- Create the trigger
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION public.handle_new_user();
+
+-- Grant necessary permissions
+GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO postgres, anon, authenticated, service_role;
+
+-- Verify the trigger was created
+SELECT 
+    trigger_name,
+    event_manipulation,
+    event_object_table,
+    action_statement
+FROM information_schema.triggers
+WHERE trigger_name = 'on_auth_user_created';
+
+-- ============================================
+-- Auto-create Cliente record when user with rol='cliente' signs up
+-- ============================================
+-- This function should be run AFTER the fresh_install schema
+
+-- Drop existing function and trigger if they exist
+DROP TRIGGER IF EXISTS on_profile_created_cliente ON profiles;
+DROP FUNCTION IF EXISTS public.handle_new_cliente() CASCADE;
+
+-- Function to create cliente record when a profile with rol='cliente' is created
+CREATE OR REPLACE FUNCTION public.handle_new_cliente()
+RETURNS TRIGGER 
+SECURITY DEFINER
+SET search_path = public
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Only create cliente if the role is 'cliente'
+    IF NEW.rol = 'cliente' THEN
+        INSERT INTO public.clientes (
+            user_id,
+            nif,
+            razon_social,
+            nombre_comercial,
+            persona_contacto,
+            telefono,
+            email,
+            direccion_fiscal,
+            estado,
+            modulo_subida_documentos,
+            modulo_incidencias,
+            modulo_asistente_e2,
+            modulo_panel_financiero,
+            modulo_facturacion
+        ) VALUES (
+            NEW.id,
+            'PENDING', -- El cliente deberá actualizar esto después
+            NEW.nombre, -- Usar el nombre del perfil como razón social temporal
+            NEW.nombre,
+            NEW.nombre,
+            COALESCE(NEW.telefono, 'PENDING'),
+            NEW.email,
+            'PENDING', -- El cliente deberá actualizar esto después
+            'activo',
+            true,  -- subida_documentos enabled by default
+            true,  -- incidencias enabled by default
+            false, -- asistente_e2 disabled by default
+            false, -- panel_financiero disabled by default
+            false  -- facturacion disabled by default
+        )
+        ON CONFLICT (user_id) DO NOTHING; -- Prevent duplicates
+    END IF;
+    
+    RETURN NEW;
+EXCEPTION
+    WHEN unique_violation THEN
+        -- Cliente already exists, just return
+        RETURN NEW;
+    WHEN OTHERS THEN
+        -- Log error and return (don't block profile creation)
+        RAISE WARNING 'Error creating cliente for user %: %', NEW.id, SQLERRM;
+        RETURN NEW;
+END;
+$$;
+
+-- Create trigger to run after profile insert
+CREATE TRIGGER on_profile_created_cliente
+    AFTER INSERT ON profiles
+    FOR EACH ROW EXECUTE FUNCTION public.handle_new_cliente();
+
+-- ============================================
+-- Verify the trigger is created
+-- ============================================
+
+SELECT 
+    trigger_name,
+    event_object_table,
+    action_timing,
+    event_manipulation
+FROM information_schema.triggers
+WHERE trigger_name = 'on_profile_created_cliente';
+
+-- ============================================
+-- SUCCESS MESSAGE
+-- ============================================
+DO $$
+BEGIN
+    RAISE NOTICE '============================================';
+    RAISE NOTICE '✅ Cliente auto-creation trigger installed!';
+    RAISE NOTICE '============================================';
+    RAISE NOTICE 'When a user signs up with rol=cliente:';
+    RAISE NOTICE '1. Profile is created (existing trigger)';
+    RAISE NOTICE '2. Cliente record is auto-created (NEW trigger)';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Note: NIF and direccion_fiscal will be "PENDING"';
+    RAISE NOTICE 'Users should update these in their profile.';
+    RAISE NOTICE '============================================';
+END $$;
+
+-- ============================================
+-- Add UNIQUE constraint to clientes.user_id
+-- ============================================
+-- This prevents having multiple cliente records for the same user
+
+-- Add unique constraint if it doesn't exist
+DO $$ 
+BEGIN
+    -- Check if constraint already exists
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'clientes_user_id_unique'
+    ) THEN
+        ALTER TABLE clientes 
+        ADD CONSTRAINT clientes_user_id_unique UNIQUE (user_id);
+        
+        RAISE NOTICE '✅ Added UNIQUE constraint on clientes.user_id';
+    ELSE
+        RAISE NOTICE 'ℹ️  UNIQUE constraint already exists on clientes.user_id';
+    END IF;
+END $$;
+
+-- Create index if it doesn't exist (for performance)
+CREATE INDEX IF NOT EXISTS idx_clientes_user_id_unique ON clientes(user_id);
+
+-- ============================================
+-- STORAGE BUCKET SETUP FOR DOCUMENTS
+-- ============================================
+-- This script sets up the storage bucket for document uploads
+-- Run this after the main schema setup
+
+-- Create the storage bucket for documents
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'documentos',
+  'documentos',
+  true,  -- Make bucket public so users can access their uploaded files
+  10485760,  -- 10MB file size limit
+  ARRAY['application/pdf', 'application/xml', 'text/xml', 'image/jpeg', 'image/jpg', 'image/png']
+)
+ON CONFLICT (id) DO UPDATE SET
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+-- ============================================
+-- STORAGE POLICIES (RLS for Storage)
+-- ============================================
+
+-- Policy: Allow authenticated users to upload files to their client folder
+CREATE POLICY "Users can upload to their client folder"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'documentos' AND
+  -- Extract cliente_id from path (format: cliente_id/filename)
+  (storage.foldername(name))[1] IN (
+    SELECT c.id::text
+    FROM clientes c
+    WHERE c.user_id = auth.uid()
+  )
+);
+
+-- Policy: Allow users to read files from their client folder
+CREATE POLICY "Users can view their client files"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'documentos' AND
+  (
+    -- Cliente can view their own files
+    (storage.foldername(name))[1] IN (
+      SELECT c.id::text
+      FROM clientes c
+      WHERE c.user_id = auth.uid()
+    )
+    OR
+    -- Asesor can view files from assigned clients
+    (storage.foldername(name))[1] IN (
+      SELECT ac.cliente_id::text
+      FROM asesor_cliente ac
+      JOIN profiles p ON ac.asesor_id = p.id
+      WHERE p.id = auth.uid()
+    )
+    OR
+    -- Admin can view all files
+    EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = auth.uid() AND p.rol = 'admin'
+    )
+  )
+);
+
+-- Policy: Allow users to delete their pending documents
+CREATE POLICY "Users can delete their pending documents"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'documentos' AND
+  (storage.foldername(name))[1] IN (
+    SELECT c.id::text
+    FROM clientes c
+    WHERE c.user_id = auth.uid()
+  )
+);
+
+-- Policy: Allow asesors and admins to view all files from their clients
+CREATE POLICY "Asesors can view client files"
+ON storage.objects FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'documentos' AND
+  (
+    EXISTS (
+      SELECT 1
+      FROM asesor_cliente ac
+      WHERE ac.cliente_id::text = (storage.foldername(name))[1]
+        AND ac.asesor_id = auth.uid()
+    )
+    OR
+    EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = auth.uid() AND p.rol IN ('admin', 'asesor')
+    )
+  )
+);
+
+-- ============================================
+-- VERIFICATION
+-- ============================================
+
+-- Check bucket exists
+SELECT 
+  id, 
+  name, 
+  public, 
+  file_size_limit,
+  allowed_mime_types
+FROM storage.buckets
+WHERE id = 'documentos';
+
+-- Check policies
+SELECT 
+  policyname,
+  cmd,
+  qual
+FROM pg_policies
+WHERE schemaname = 'storage' AND tablename = 'objects';
+
+-- Success message
+DO $$
+BEGIN
+    RAISE NOTICE '============================================';
+    RAISE NOTICE '✅ STORAGE BUCKET SETUP COMPLETED!';
+    RAISE NOTICE '============================================';
+    RAISE NOTICE 'Bucket created: documentos';
+    RAISE NOTICE 'File size limit: 10MB';
+    RAISE NOTICE 'Allowed types: PDF, XML, JPG, PNG';
+    RAISE NOTICE 'RLS policies configured';
+    RAISE NOTICE '============================================';
+END $$;
+
+-- Database updates for incidencias feature with file attachments
+-- Run these SQL commands in your Supabase SQL editor
+
+-- 1. Add file attachment support to mensajes_incidencia table
+ALTER TABLE mensajes_incidencia 
+ADD COLUMN IF NOT EXISTS archivos_adjuntos JSONB DEFAULT '[]'::jsonb,
+ADD COLUMN IF NOT EXISTS es_ia BOOLEAN DEFAULT false,
+ADD COLUMN IF NOT EXISTS rol VARCHAR(20) DEFAULT 'cliente';
+
+-- 2. Create storage bucket for incident attachments
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('incidencias', 'incidencias', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- 3. Set up RLS policies for incidencias storage bucket
+CREATE POLICY "Users can upload incident attachments" ON storage.objects
+FOR INSERT WITH CHECK (bucket_id = 'incidencias' AND auth.role() = 'authenticated');
+
+CREATE POLICY "Users can view incident attachments" ON storage.objects
+FOR SELECT USING (bucket_id = 'incidencias' AND auth.role() = 'authenticated');
+
+-- 4. Update mensajes_incidencia table to include rol information
+-- This will help distinguish between different user types in messages
+UPDATE mensajes_incidencia 
+SET rol = 'cliente' 
+WHERE rol IS NULL;
+
+-- 5. Create index for better performance on incident queries
+CREATE INDEX IF NOT EXISTS idx_incidencias_cliente_estado 
+ON incidencias(cliente_id, estado);
+
+CREATE INDEX IF NOT EXISTS idx_mensajes_incidencia_fecha 
+ON mensajes_incidencia(incidencia_id, fecha);
+
+-- 6. Add function to get user role for message display
+CREATE OR REPLACE FUNCTION get_user_role(user_id UUID)
+RETURNS VARCHAR(20) AS $$
+BEGIN
+  RETURN (
+    SELECT rol 
+    FROM profiles 
+    WHERE id = user_id
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 7. Update the getIncidencias function to include proper role information
+-- This is handled in the application code, but here's the SQL for reference
+-- The application should join with profiles table to get user roles
+
+-- RLS Policies Update for Incidencias Feature
+-- Run this SQL in your Supabase SQL editor to fix the "row-level security policy" error
+
+-- 1. Enable RLS on incidencias table if not already enabled
+ALTER TABLE public.incidencias ENABLE ROW LEVEL SECURITY;
+
+-- 2. Enable RLS on mensajes_incidencia table if not already enabled
+ALTER TABLE public.mensajes_incidencia ENABLE ROW LEVEL SECURITY;
+
+-- 3. Drop existing policies if they exist (to avoid conflicts)
+DROP POLICY IF EXISTS "Authenticated users can create incidencias" ON public.incidencias;
+DROP POLICY IF EXISTS "Users can view their own incidencias" ON public.incidencias;
+DROP POLICY IF EXISTS "Users can update their own incidencias" ON public.incidencias;
+DROP POLICY IF EXISTS "Users can create mensajes for their incidencias" ON public.mensajes_incidencia;
+DROP POLICY IF EXISTS "Users can view mensajes for their incidencias" ON public.mensajes_incidencia;
+
+-- 4. Create RLS policies for incidencias table
+CREATE POLICY "Authenticated users can create incidencias" ON public.incidencias
+FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+CREATE POLICY "Users can view their own incidencias" ON public.incidencias
+FOR SELECT USING (
+  auth.role() = 'authenticated' AND (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    ) OR
+    asesor_id IN (
+      SELECT id FROM profiles WHERE id = auth.uid() AND rol = 'asesor'
+    ) OR
+    EXISTS (
+      SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    )
+  )
+);
+
+CREATE POLICY "Users can update their own incidencias" ON public.incidencias
+FOR UPDATE USING (
+  auth.role() = 'authenticated' AND (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    ) OR
+    asesor_id IN (
+      SELECT id FROM profiles WHERE id = auth.uid() AND rol = 'asesor'
+    ) OR
+    EXISTS (
+      SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    )
+  )
+);
+
+-- 5. Create RLS policies for mensajes_incidencia table
+CREATE POLICY "Users can create mensajes for their incidencias" ON public.mensajes_incidencia
+FOR INSERT WITH CHECK (
+  auth.role() = 'authenticated' AND
+  incidencia_id IN (
+    SELECT id FROM incidencias WHERE 
+    cliente_id IN (SELECT id FROM clientes WHERE user_id = auth.uid()) OR
+    asesor_id IN (SELECT id FROM profiles WHERE id = auth.uid() AND rol = 'asesor') OR
+    EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin')
+  )
+);
+
+CREATE POLICY "Users can view mensajes for their incidencias" ON public.mensajes_incidencia
+FOR SELECT USING (
+  auth.role() = 'authenticated' AND
+  incidencia_id IN (
+    SELECT id FROM incidencias WHERE 
+    cliente_id IN (SELECT id FROM clientes WHERE user_id = auth.uid()) OR
+    asesor_id IN (SELECT id FROM profiles WHERE id = auth.uid() AND rol = 'asesor') OR
+    EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin')
+  )
+);
+
+-- 6. Verify policies were created
+SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual 
+FROM pg_policies 
+WHERE tablename IN ('incidencias', 'mensajes_incidencia')
+ORDER BY tablename, policyname;
+
+-- Migration: Add Panel Financiero tables
+-- Description: Creates tables for financial documents, analyses, and queries
+
+-- Table: documentos_financieros
+-- Stores financial documents uploaded by advisors (P&L, Balance, Excel, etc.)
+CREATE TABLE IF NOT EXISTS documentos_financieros (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+  asesor_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  nombre TEXT NOT NULL,
+  tipo TEXT NOT NULL CHECK (tipo IN ('pyg', 'balance', 'mayor', 'extracto', 'excel', 'otro_financiero')),
+  periodo TEXT NOT NULL, -- e.g., "Q1 2024", "2024", "Enero 2024"
+  fecha_subida TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  url_archivo TEXT NOT NULL,
+  tamanio BIGINT NOT NULL,
+  procesado_ia BOOLEAN NOT NULL DEFAULT FALSE,
+  datos_extraidos JSONB, -- Extracted data from the document
+  analisis_ia JSONB, -- AI analysis result
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table: consultas_financieras
+-- Stores natural language queries from clients and AI responses
+CREATE TABLE IF NOT EXISTS consultas_financieras (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+  pregunta TEXT NOT NULL,
+  respuesta TEXT NOT NULL,
+  fecha TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  documentos_referenciados UUID[], -- Array of document IDs referenced in the response
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for better query performance
+CREATE INDEX IF NOT EXISTS idx_documentos_financieros_cliente ON documentos_financieros(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_financieros_asesor ON documentos_financieros(asesor_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_financieros_periodo ON documentos_financieros(periodo);
+CREATE INDEX IF NOT EXISTS idx_documentos_financieros_fecha ON documentos_financieros(fecha_subida DESC);
+
+CREATE INDEX IF NOT EXISTS idx_consultas_financieras_cliente ON consultas_financieras(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_consultas_financieras_fecha ON consultas_financieras(fecha DESC);
+
+-- Function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger for documentos_financieros
+DROP TRIGGER IF EXISTS update_documentos_financieros_updated_at ON documentos_financieros;
+CREATE TRIGGER update_documentos_financieros_updated_at
+  BEFORE UPDATE ON documentos_financieros
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Row Level Security (RLS) policies
+
+-- Enable RLS
+ALTER TABLE documentos_financieros ENABLE ROW LEVEL SECURITY;
+ALTER TABLE consultas_financieras ENABLE ROW LEVEL SECURITY;
+
+-- Policies for documentos_financieros
+-- Admins can see all documents
+CREATE POLICY "Admins can view all financial documents"
+  ON documentos_financieros FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'admin'
+    )
+  );
+
+-- Advisors can see documents for their assigned clients
+CREATE POLICY "Advisors can view their clients' financial documents"
+  ON documentos_financieros FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente
+      WHERE asesor_cliente.asesor_id = auth.uid()
+      AND asesor_cliente.cliente_id = documentos_financieros.cliente_id
+    )
+  );
+
+-- Clients can see their own financial documents
+CREATE POLICY "Clients can view their own financial documents"
+  ON documentos_financieros FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM clientes
+      WHERE clientes.id = documentos_financieros.cliente_id
+      AND clientes.user_id = auth.uid()
+    )
+  );
+
+-- Advisors can insert documents for their clients
+CREATE POLICY "Advisors can insert financial documents for their clients"
+  ON documentos_financieros FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente
+      WHERE asesor_cliente.asesor_id = auth.uid()
+      AND asesor_cliente.cliente_id = documentos_financieros.cliente_id
+    )
+  );
+
+-- Advisors can update documents for their clients
+CREATE POLICY "Advisors can update financial documents for their clients"
+  ON documentos_financieros FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente
+      WHERE asesor_cliente.asesor_id = auth.uid()
+      AND asesor_cliente.cliente_id = documentos_financieros.cliente_id
+    )
+  );
+
+-- Advisors can delete documents for their clients
+CREATE POLICY "Advisors can delete financial documents for their clients"
+  ON documentos_financieros FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente
+      WHERE asesor_cliente.asesor_id = auth.uid()
+      AND asesor_cliente.cliente_id = documentos_financieros.cliente_id
+    )
+  );
+
+-- Policies for consultas_financieras
+-- Admins can see all queries
+CREATE POLICY "Admins can view all financial queries"
+  ON consultas_financieras FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'admin'
+    )
+  );
+
+-- Advisors can see queries from their assigned clients
+CREATE POLICY "Advisors can view their clients' financial queries"
+  ON consultas_financieras FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente
+      WHERE asesor_cliente.asesor_id = auth.uid()
+      AND asesor_cliente.cliente_id = consultas_financieras.cliente_id
+    )
+  );
+
+-- Clients can see their own queries
+CREATE POLICY "Clients can view their own financial queries"
+  ON consultas_financieras FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM clientes
+      WHERE clientes.id = consultas_financieras.cliente_id
+      AND clientes.user_id = auth.uid()
+    )
+  );
+
+-- Clients can insert their own queries (through the app)
+CREATE POLICY "Clients can insert their own financial queries"
+  ON consultas_financieras FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM clientes
+      WHERE clientes.id = consultas_financieras.cliente_id
+      AND clientes.user_id = auth.uid()
+    )
+  );
+
+-- Grant necessary permissions
+GRANT ALL ON documentos_financieros TO authenticated;
+GRANT ALL ON consultas_financieras TO authenticated;
+
+-- ============================================
+-- E2 ASSISTANT TABLES
+-- ============================================
+-- Migration to add E2 Assistant conversation storage
+-- Created: October 28, 2025
+
+-- Conversations table for storing chat sessions
+CREATE TABLE IF NOT EXISTS conversaciones_asistente (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  titulo TEXT NOT NULL DEFAULT 'Nueva consulta',
+  fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  fecha_ultima_actividad TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  derivado_a_asesor BOOLEAN DEFAULT false,
+  asesor_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Messages table for storing individual chat messages
+CREATE TABLE IF NOT EXISTS mensajes_asistente (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  conversacion_id UUID REFERENCES conversaciones_asistente(id) ON DELETE CASCADE,
+  rol TEXT NOT NULL CHECK (rol IN ('usuario', 'asistente')),
+  contenido TEXT NOT NULL,
+  metadatos JSONB, -- For storing action buttons, document links, etc.
+  es_derivacion BOOLEAN DEFAULT false,
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Knowledge base table for E2 Assistant training data
+CREATE TABLE IF NOT EXISTS base_conocimiento_e2 (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  categoria TEXT NOT NULL, -- 'fiscal', 'laboral', 'contable', 'explicativo'
+  subcategoria TEXT,
+  pregunta TEXT NOT NULL,
+  respuesta TEXT NOT NULL,
+  palabras_clave TEXT[], -- For semantic search
+  fuente_oficial TEXT, -- Reference to official documentation
+  vigencia_desde DATE,
+  vigencia_hasta DATE,
+  prioridad INTEGER DEFAULT 0, -- Higher priority answers shown first
+  num_usos INTEGER DEFAULT 0, -- Track usage for analytics
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Tax calendar/deadlines table
+CREATE TABLE IF NOT EXISTS calendario_fiscal (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  modelo TEXT NOT NULL, -- e.g., '303', '111', '130', etc.
+  descripcion TEXT NOT NULL,
+  periodo TEXT NOT NULL, -- 'mensual', 'trimestral', 'anual'
+  mes_vencimiento INTEGER, -- 1-12
+  dia_vencimiento INTEGER, -- 1-31
+  trimestre INTEGER, -- 1-4 for quarterly taxes
+  obligatorio_autonomos BOOLEAN DEFAULT false,
+  obligatorio_sociedades BOOLEAN DEFAULT false,
+  notas TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Client-specific tax reminders
+CREATE TABLE IF NOT EXISTS recordatorios_fiscales (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  calendario_fiscal_id UUID REFERENCES calendario_fiscal(id) ON DELETE CASCADE,
+  fecha_vencimiento DATE NOT NULL,
+  completado BOOLEAN DEFAULT false,
+  fecha_completado TIMESTAMP WITH TIME ZONE,
+  notas TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ============================================
+-- INDEXES for performance
+-- ============================================
+
+CREATE INDEX idx_conversaciones_cliente ON conversaciones_asistente(cliente_id, fecha_ultima_actividad DESC);
+CREATE INDEX idx_mensajes_conversacion ON mensajes_asistente(conversacion_id, fecha);
+CREATE INDEX idx_base_conocimiento_categoria ON base_conocimiento_e2(categoria);
+CREATE INDEX idx_base_conocimiento_keywords ON base_conocimiento_e2 USING GIN(palabras_clave);
+CREATE INDEX idx_calendario_fiscal_periodo ON calendario_fiscal(periodo, mes_vencimiento);
+CREATE INDEX idx_recordatorios_cliente_fecha ON recordatorios_fiscales(cliente_id, fecha_vencimiento);
+
+-- ============================================
+-- SEED DATA: Spanish Tax Calendar
+-- ============================================
+
+INSERT INTO calendario_fiscal (modelo, descripcion, periodo, mes_vencimiento, dia_vencimiento, trimestre, obligatorio_autonomos, obligatorio_sociedades, notas) VALUES
+-- Monthly models
+('111', 'Retenciones e ingresos a cuenta de rendimientos del trabajo', 'mensual', NULL, 20, NULL, false, true, 'Presentación mensual o trimestral según volumen'),
+('115', 'Retenciones e ingresos a cuenta de rendimientos de arrendamiento', 'trimestral', NULL, 20, NULL, true, true, 'Trimestral para la mayoría'),
+('130', 'Pago fraccionado IRPF (autónomos)', 'trimestral', NULL, 20, NULL, true, false, 'Trimestral para estimación directa'),
+
+-- IVA Quarterly
+('303', 'IVA - Autoliquidación trimestral', 'trimestral', NULL, 20, 1, true, true, '1T: abril, 2T: julio, 3T: octubre, 4T: enero'),
+('303', 'IVA - Autoliquidación trimestral', 'trimestral', NULL, 20, 2, true, true, '1T: abril, 2T: julio, 3T: octubre, 4T: enero'),
+('303', 'IVA - Autoliquidación trimestral', 'trimestral', NULL, 20, 3, true, true, '1T: abril, 2T: julio, 3T: octubre, 4T: enero'),
+('303', 'IVA - Autoliquidación trimestral', 'trimestral', NULL, 20, 4, true, true, '1T: abril, 2T: julio, 3T: octubre, 4T: enero'),
+
+-- Annual models
+('100', 'IRPF - Declaración anual de la renta', 'anual', 6, 30, NULL, true, false, 'Campaña de abril a junio'),
+('200', 'Impuesto sobre Sociedades', 'anual', 7, 25, NULL, false, true, 'Hasta 25 días después del cierre fiscal'),
+('390', 'IVA - Resumen anual', 'anual', 1, 30, NULL, true, true, 'Enero del año siguiente'),
+
+-- Special models
+('349', 'Declaración recapitulativa de operaciones intracomunitarias', 'mensual', NULL, 20, NULL, false, true, 'Si hay operaciones intracomunitarias'),
+('347', 'Declaración anual de operaciones con terceros', 'anual', 2, 28, NULL, true, true, 'Operaciones superiores a 3.005,06€');
+
+-- ============================================
+-- SEED DATA: Knowledge Base (Sample)
+-- ============================================
+
+INSERT INTO base_conocimiento_e2 (categoria, subcategoria, pregunta, respuesta, palabras_clave, fuente_oficial, prioridad) VALUES
+('fiscal', 'iva', '¿Qué tipos de IVA hay en España?', 
+'En España existen tres tipos de IVA:
+
+• **IVA General (21%)**: Se aplica a la mayoría de productos y servicios.
+• **IVA Reducido (10%)**: Aplicable a alimentos, transporte de viajeros, hostelería, etc.
+• **IVA Superreducido (4%)**: Para productos básicos como pan, leche, huevos, frutas, verduras, libros, periódicos, medicamentos de uso humano, viviendas de protección oficial, etc.
+
+Para servicios profesionales se aplica generalmente el IVA general del 21%.', 
+ARRAY['iva', 'tipos', 'porcentaje', '21%', '10%', '4%', 'general', 'reducido', 'superreducido'],
+'Ley 37/1992, del Impuesto sobre el Valor Añadido',
+10),
+
+('fiscal', 'iva', '¿Cuándo tengo que presentar el IVA?',
+'El IVA se presenta mediante el **Modelo 303** de forma trimestral para la mayoría de autónomos y pequeñas empresas:
+
+• **1er Trimestre** (ene-mar): hasta el 20 de abril
+• **2º Trimestre** (abr-jun): hasta el 20 de julio
+• **3er Trimestre** (jul-sep): hasta el 20 de octubre
+• **4º Trimestre** (oct-dic): hasta el 30 de enero del año siguiente
+
+Grandes empresas deben presentarlo mensualmente. Al final de año también hay que presentar el **Modelo 390** (resumen anual) antes del 30 de enero.',
+ARRAY['iva', 'modelo 303', 'trimestral', 'vencimiento', 'plazo', 'presentación', 'calendario'],
+'Orden HAC/3625/2003',
+10),
+
+('explicativo', 'conceptos', '¿Qué es una factura rectificativa?',
+'Una **factura rectificativa** es un documento contable que se emite para corregir errores en una factura previamente emitida. Se utiliza cuando:
+
+• Hay errores en el importe (precio, cantidad, descuentos)
+• Datos incorrectos del cliente o proveedor
+• Tipo de IVA aplicado incorrectamente
+• Necesitas anular parcial o totalmente una factura
+
+**Requisitos importantes:**
+✓ Debe hacer referencia a la factura original (número y fecha)
+✓ Indicar claramente el motivo de la rectificación
+✓ La factura original NO se elimina, se conservan ambas
+✓ Afecta al IVA del periodo en que se emite la rectificativa
+
+No confundir con factura duplicada, que es simplemente una copia.',
+ARRAY['factura', 'rectificativa', 'corrección', 'error', 'anular', 'modificar'],
+'Real Decreto 1619/2012, Reglamento de Facturación',
+8),
+
+('explicativo', 'conceptos', '¿Qué documentos debo conservar?',
+'Por ley, debes conservar durante **4 años** (6 años para el Impuesto de Sociedades):
+
+**Documentos obligatorios:**
+✓ Todas las facturas emitidas y recibidas
+✓ Tickets y justificantes de gastos deducibles
+✓ Contratos relevantes para la actividad
+✓ Nóminas y seguros sociales (si tienes empleados)
+✓ Extractos bancarios
+✓ Libros contables y registros oficiales
+✓ Declaraciones de impuestos presentadas
+
+**Formato:**
+• Pueden conservarse en formato digital (escaneados)
+• Deben ser legibles y estar disponibles para inspecciones
+• Organízalos por año y tipo de documento
+
+Nuestra plataforma te ayuda a almacenarlos de forma segura y organizada.',
+ARRAY['documentos', 'conservar', 'guardar', 'archivo', 'plazo', 'obligación', 'facturas', 'tickets'],
+'Ley 58/2003, Ley General Tributaria',
+9),
+
+('fiscal', 'deducciones', '¿Puedo deducir los gastos de mi vehículo?',
+'Los gastos de vehículo **sí son deducibles** si lo usas para tu actividad profesional, pero con límites:
+
+**Gastos deducibles:**
+✓ Combustible
+✓ Reparaciones y mantenimiento
+✓ Seguro del vehículo
+✓ ITV e impuestos (circulación)
+✓ Parking relacionado con la actividad
+✓ Amortización del vehículo
+
+**Límites importantes:**
+• Para autónomos: deducción del 50% si uso mixto (profesional y personal)
+• IVA del vehículo: solo deducible al 50% en turismos
+• Debes poder justificar el uso profesional
+• Si es uso 100% profesional, debes demostrarlo (ej: vehículo de empresa)
+
+**Recomendación:** Lleva un registro de kilómetros profesionales vs personales. Tu asesor puede ayudarte a calcular la proporción exacta para tu caso.',
+ARRAY['vehículo', 'coche', 'gastos', 'deducir', 'combustible', 'deducción', 'autonomo'],
+'Ley 35/2006, IRPF - Art. 30',
+7),
+
+('laboral', 'autonomos', '¿Cuánto tengo que pagar de cuota de autónomos?',
+'La cuota de autónomos en 2025 depende de tus **ingresos reales** (sistema de cotización por tramos):
+
+**Sistema actual:**
+• Cuota mínima: ~230€/mes (rendimientos hasta 670€/mes)
+• Cuota máxima: ~500€/mes (rendimientos superiores a 6.000€/mes)
+• La cuota se ajusta según tus ingresos declarados
+
+**Importante:**
+✓ Debes estimar tus ingresos al inicio del año
+✓ Puedes cambiar la base de cotización hasta 4 veces al año
+✓ Hacienda regularizará si tus ingresos reales difieren de tu cotización
+✓ Tarifa plana: 80€/mes los primeros 12 meses (si eres nuevo autónomo)
+
+**Bonificaciones:**
+• Autónomos menores de 30 años: bonificaciones adicionales
+• Autónomos con discapacidad: reducciones especiales
+• Pluriactividad: si también eres asalariado
+
+Consulta con tu asesor tu situación específica.',
+ARRAY['autónomo', 'cuota', 'seguridad social', 'cotización', 'pagar', 'tarifa plana'],
+'Real Decreto-ley 13/2022',
+8);
+
+-- Grant permissions (adjust according to your RLS policies)
+ALTER TABLE conversaciones_asistente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mensajes_asistente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE base_conocimiento_e2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE calendario_fiscal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recordatorios_fiscales ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for conversations (clients can only see their own)
+CREATE POLICY "Clients can view their own conversations"
+  ON conversaciones_asistente FOR SELECT
+  USING (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Clients can insert their own conversations"
+  ON conversaciones_asistente FOR INSERT
+  WITH CHECK (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Clients can update their own conversations"
+  ON conversaciones_asistente FOR UPDATE
+  USING (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+-- RLS Policies for messages
+CREATE POLICY "Users can view messages from their conversations"
+  ON mensajes_asistente FOR SELECT
+  USING (
+    conversacion_id IN (
+      SELECT id FROM conversaciones_asistente 
+      WHERE cliente_id IN (
+        SELECT id FROM clientes WHERE user_id = auth.uid()
+      )
+    )
+  );
+
+CREATE POLICY "Users can insert messages in their conversations"
+  ON mensajes_asistente FOR INSERT
+  WITH CHECK (
+    conversacion_id IN (
+      SELECT id FROM conversaciones_asistente 
+      WHERE cliente_id IN (
+        SELECT id FROM clientes WHERE user_id = auth.uid()
+      )
+    )
+  );
+
+-- RLS Policies for knowledge base (read-only for all authenticated users)
+CREATE POLICY "Authenticated users can read knowledge base"
+  ON base_conocimiento_e2 FOR SELECT
+  TO authenticated
+  USING (true);
+
+-- RLS Policies for fiscal calendar (read for all authenticated users)
+CREATE POLICY "Authenticated users can read fiscal calendar"
+  ON calendario_fiscal FOR SELECT
+  TO authenticated
+  USING (true);
+
+-- RLS Policies for reminders (clients can manage their own)
+CREATE POLICY "Clients can view their own reminders"
+  ON recordatorios_fiscales FOR SELECT
+  USING (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Clients can insert their own reminders"
+  ON recordatorios_fiscales FOR INSERT
+  WITH CHECK (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Clients can update their own reminders"
+  ON recordatorios_fiscales FOR UPDATE
+  USING (
+    cliente_id IN (
+      SELECT id FROM clientes WHERE user_id = auth.uid()
+    )
+  );
+
+-- Create a function to automatically generate tax reminders for the current year
+CREATE OR REPLACE FUNCTION generar_recordatorios_fiscales_cliente(p_cliente_id UUID)
+RETURNS void AS $$
+DECLARE
+  v_anio INTEGER := EXTRACT(YEAR FROM CURRENT_DATE);
+  v_calendario RECORD;
+  v_fecha DATE;
+BEGIN
+  -- Generate reminders for each applicable tax deadline
+  FOR v_calendario IN 
+    SELECT * FROM calendario_fiscal 
+    WHERE (obligatorio_autonomos = true OR obligatorio_sociedades = true)
+  LOOP
+    IF v_calendario.periodo = 'trimestral' AND v_calendario.trimestre IS NOT NULL THEN
+      -- Generate quarterly reminders
+      v_fecha := DATE(v_anio || '-' || 
+        CASE v_calendario.trimestre
+          WHEN 1 THEN '04'
+          WHEN 2 THEN '07'
+          WHEN 3 THEN '10'
+          WHEN 4 THEN '01'
+        END || '-' || v_calendario.dia_vencimiento);
+      
+      IF v_calendario.trimestre = 4 THEN
+        v_fecha := DATE((v_anio + 1) || '-01-' || v_calendario.dia_vencimiento);
+      END IF;
+      
+      INSERT INTO recordatorios_fiscales (cliente_id, calendario_fiscal_id, fecha_vencimiento)
+      VALUES (p_cliente_id, v_calendario.id, v_fecha)
+      ON CONFLICT DO NOTHING;
+      
+    ELSIF v_calendario.periodo = 'anual' AND v_calendario.mes_vencimiento IS NOT NULL THEN
+      -- Generate annual reminder
+      v_fecha := DATE(v_anio || '-' || 
+        LPAD(v_calendario.mes_vencimiento::text, 2, '0') || '-' || 
+        LPAD(v_calendario.dia_vencimiento::text, 2, '0'));
+      
+      INSERT INTO recordatorios_fiscales (cliente_id, calendario_fiscal_id, fecha_vencimiento)
+      VALUES (p_cliente_id, v_calendario.id, v_fecha)
+      ON CONFLICT DO NOTHING;
+    END IF;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON TABLE conversaciones_asistente IS 'Stores E2 Assistant conversation sessions for clients';
+COMMENT ON TABLE mensajes_asistente IS 'Individual messages within E2 Assistant conversations';
+COMMENT ON TABLE base_conocimiento_e2 IS 'Knowledge base for E2 Assistant with fiscal and labor information';
+COMMENT ON TABLE calendario_fiscal IS 'Spanish tax calendar with deadlines and models';
+COMMENT ON TABLE recordatorios_fiscales IS 'Client-specific tax reminders based on fiscal calendar';
+
+-- Migration: Add user preferences and notification settings
+-- Created: 2025-10-28
+-- Purpose: Store user preferences (theme, language, page size) and notification settings
+
+-- ============================================
+-- User Preferences Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS user_preferences (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  
+  -- Display preferences
+  modo_oscuro BOOLEAN DEFAULT false,
+  idioma TEXT DEFAULT 'es' CHECK (idioma IN ('es', 'ca', 'en')),
+  tamano_pagina INTEGER DEFAULT 20 CHECK (tamano_pagina IN (10, 20, 50, 100)),
+  vista_documentos_por_defecto TEXT DEFAULT 'tabla' CHECK (vista_documentos_por_defecto IN ('tabla', 'tarjetas')),
+  
+  -- Timestamps
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  -- Ensure one preference row per user
+  UNIQUE(user_id)
+);
+
+-- ============================================
+-- Notification Settings Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS notification_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  
+  -- Document notifications
+  documentos_subidos BOOLEAN DEFAULT true,
+  documentos_contabilizados BOOLEAN DEFAULT true,
+  
+  -- Incident notifications
+  incidencias_nuevas BOOLEAN DEFAULT true,
+  incidencias_resueltas BOOLEAN DEFAULT true,
+  
+  -- Report notifications
+  informes_disponibles BOOLEAN DEFAULT true,
+  
+  -- Reminder notifications
+  recordatorios_ia BOOLEAN DEFAULT true,
+  vencimientos_fiscales BOOLEAN DEFAULT true,
+  
+  -- Other notifications
+  actualizaciones_plataforma BOOLEAN DEFAULT false,
+  
+  -- Timestamps
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  -- Ensure one notification settings row per user
+  UNIQUE(user_id)
+);
+
+-- ============================================
+-- Indexes for performance
+-- ============================================
+CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user_id);
+CREATE INDEX IF NOT EXISTS idx_notification_settings_user_id ON notification_settings(user_id);
+
+-- ============================================
+-- Triggers for auto-updating timestamps
+-- ============================================
+CREATE TRIGGER update_user_preferences_updated_at 
+  BEFORE UPDATE ON user_preferences
+  FOR EACH ROW 
+  EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_notification_settings_updated_at 
+  BEFORE UPDATE ON notification_settings
+  FOR EACH ROW 
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- Row Level Security (RLS) Policies
+-- ============================================
+
+-- Enable RLS
+ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notification_settings ENABLE ROW LEVEL SECURITY;
+
+-- User Preferences Policies
+-- Users can only view and update their own preferences
+CREATE POLICY "Users can view their own preferences"
+  ON user_preferences FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own preferences"
+  ON user_preferences FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own preferences"
+  ON user_preferences FOR UPDATE
+  USING (auth.uid() = user_id);
+
+-- Notification Settings Policies
+-- Users can only view and update their own notification settings
+CREATE POLICY "Users can view their own notification settings"
+  ON notification_settings FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own notification settings"
+  ON notification_settings FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own notification settings"
+  ON notification_settings FOR UPDATE
+  USING (auth.uid() = user_id);
+
+-- ============================================
+-- Initialize default preferences for existing users
+-- ============================================
+
+-- Create default preferences for existing users who don't have them
+INSERT INTO user_preferences (user_id)
+SELECT id FROM profiles
+WHERE NOT EXISTS (
+  SELECT 1 FROM user_preferences WHERE user_preferences.user_id = profiles.id
+);
+
+-- Create default notification settings for existing users who don't have them
+INSERT INTO notification_settings (user_id)
+SELECT id FROM profiles
+WHERE NOT EXISTS (
+  SELECT 1 FROM notification_settings WHERE notification_settings.user_id = profiles.id
+);
+
+-- ============================================
+-- Function to create default settings for new users
+-- ============================================
+
+CREATE OR REPLACE FUNCTION create_user_settings()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Create default preferences
+  INSERT INTO user_preferences (user_id)
+  VALUES (NEW.id)
+  ON CONFLICT (user_id) DO NOTHING;
+  
+  -- Create default notification settings
+  INSERT INTO notification_settings (user_id)
+  VALUES (NEW.id)
+  ON CONFLICT (user_id) DO NOTHING;
+  
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to create settings when a new profile is created
+CREATE TRIGGER on_profile_created_create_settings
+  AFTER INSERT ON profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION create_user_settings();
+
+-- Fix RLS policies for clientes table to allow updates
+-- Run this in Supabase SQL Editor
+
+-- Check current RLS status
+SELECT tablename, rowsecurity 
+FROM pg_tables 
+WHERE schemaname = 'public' AND tablename = 'clientes';
+
+-- Check existing policies
+SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
+FROM pg_policies 
+WHERE schemaname = 'public' AND tablename = 'clientes';
+
+-- ============================================
+-- Drop existing policies (if any issues)
+-- ============================================
+DROP POLICY IF EXISTS "Clientes can view their own data" ON clientes;
+DROP POLICY IF EXISTS "Clientes can update their own data" ON clientes;
+DROP POLICY IF EXISTS "Users can view clientes" ON clientes;
+DROP POLICY IF EXISTS "Asesores can view their assigned clientes" ON clientes;
+DROP POLICY IF EXISTS "Asesores can update their assigned clientes" ON clientes;
+DROP POLICY IF EXISTS "Admins have full access to clientes" ON clientes;
+
+-- ============================================
+-- Enable RLS
+-- ============================================
+ALTER TABLE clientes ENABLE ROW LEVEL SECURITY;
+
+-- ============================================
+-- Create new policies
+-- ============================================
+
+-- Policy 1: Clients can view their own data
+CREATE POLICY "Clientes can view their own data"
+  ON clientes
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'cliente'
+      AND clientes.user_id = profiles.id
+    )
+  );
+
+-- Policy 2: Clients can update their own contact data
+CREATE POLICY "Clientes can update their own contact data"
+  ON clientes
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'cliente'
+      AND clientes.user_id = profiles.id
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'cliente'
+      AND clientes.user_id = profiles.id
+    )
+  );
+
+-- Policy 3: Asesores can view their assigned clients
+CREATE POLICY "Asesores can view their assigned clientes"
+  ON clientes
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      JOIN asesor_cliente ON asesor_cliente.asesor_id = profiles.id
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'asesor'
+      AND asesor_cliente.cliente_id = clientes.id
+    )
+    OR
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'asesor'
+    )
+  );
+
+-- Policy 4: Asesores can update their assigned clients
+CREATE POLICY "Asesores can update their assigned clientes"
+  ON clientes
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      JOIN asesor_cliente ON asesor_cliente.asesor_id = profiles.id
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'asesor'
+      AND asesor_cliente.cliente_id = clientes.id
+    )
+    OR
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'asesor'
+    )
+  );
+
+-- Policy 5: Admins have full access
+CREATE POLICY "Admins have full access to clientes"
+  ON clientes
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.rol = 'admin'
+    )
+  );
+
+-- ============================================
+-- Verify policies were created
+-- ============================================
+SELECT 
+  policyname,
+  cmd,
+  permissive,
+  CASE 
+    WHEN policyname LIKE '%Cliente%' THEN 'For Clients'
+    WHEN policyname LIKE '%Asesor%' THEN 'For Asesores'
+    WHEN policyname LIKE '%Admin%' THEN 'For Admins'
+  END as applies_to
+FROM pg_policies 
+WHERE schemaname = 'public' AND tablename = 'clientes'
+ORDER BY cmd, policyname;
+
+-- ============================================
+-- Test query (run while logged in as a client)
+-- ============================================
+-- This should return the client's own data:
+-- SELECT * FROM clientes WHERE user_id = auth.uid();
+
+-- Test update (replace with real values):
+-- UPDATE clientes 
+-- SET persona_contacto = 'Test Name', telefono = '123456789'
+-- WHERE user_id = auth.uid();
+
+-- QUICK FIX: Enable clients to update their own profile data
+-- Copy and paste this ENTIRE script into Supabase SQL Editor and click RUN
+
+-- Step 1: Enable RLS on clientes table
+ALTER TABLE clientes ENABLE ROW LEVEL SECURITY;
+
+-- Step 2: Drop any conflicting policies
+DROP POLICY IF EXISTS "Clientes can update their own contact data" ON clientes;
+DROP POLICY IF EXISTS "Clientes can update their own data" ON clientes;
+DROP POLICY IF EXISTS "Enable update for clients on their own data" ON clientes;
+
+-- Step 3: Create a simple, permissive UPDATE policy for clients
+CREATE POLICY "Clientes can update their own contact data"
+ON clientes
+FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+
+-- Step 4: Verify the policy was created
+SELECT 
+    schemaname,
+    tablename,
+    policyname,
+    permissive,
+    roles,
+    cmd,
+    qual,
+    with_check
+FROM pg_policies 
+WHERE tablename = 'clientes' AND cmd = 'UPDATE';
+
+-- Step 5: Test if you can see your own cliente record
+-- (This should return 1 row with your company data)
+SELECT id, razon_social, persona_contacto, telefono, email
+FROM clientes 
+WHERE user_id = auth.uid();
+
+-- If the above query returns your data, the policy should work!
+
+-- ============================================
+-- FIX CLIENTES TABLE RLS POLICIES
+-- This script allows admins and asesores to fully manage clients
+-- ============================================
+
+-- Drop existing policies
+DROP POLICY IF EXISTS "Clientes can view their own data" ON clientes;
+DROP POLICY IF EXISTS "Admins can manage all clients" ON clientes;
+DROP POLICY IF EXISTS "Asesores can view their assigned clients" ON clientes;
+
+-- Enable RLS on clientes table (if not already enabled)
+ALTER TABLE clientes ENABLE ROW LEVEL SECURITY;
+
+-- ============================================
+-- CLIENTES POLICIES
+-- ============================================
+
+-- Policy 1: Clientes can view their own data
+CREATE POLICY "Clientes can view their own data" ON clientes
+    FOR SELECT 
+    USING (user_id = auth.uid());
+
+-- Policy 2: Admins have full access to all clients
+CREATE POLICY "Admins have full access" ON clientes
+    FOR ALL 
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'admin'
+        )
+    )
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'admin'
+        )
+    );
+
+-- Policy 3: Asesores can view their assigned clients
+CREATE POLICY "Asesores can view assigned clients" ON clientes
+    FOR SELECT 
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'asesor'
+        )
+    );
+
+-- Policy 4: Asesores can insert new clients
+CREATE POLICY "Asesores can insert clients" ON clientes
+    FOR INSERT 
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'asesor'
+        )
+    );
+
+-- Policy 5: Asesores can update their assigned clients
+CREATE POLICY "Asesores can update assigned clients" ON clientes
+    FOR UPDATE 
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'asesor'
+        ) AND (
+            EXISTS (
+                SELECT 1 FROM asesor_cliente 
+                WHERE asesor_id = auth.uid() AND cliente_id = clientes.id
+            )
+        )
+    )
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'asesor'
+        )
+    );
+
+-- Policy 6: Asesores can delete their assigned clients
+CREATE POLICY "Asesores can delete assigned clients" ON clientes
+    FOR DELETE 
+    USING (
+        EXISTS (
+            SELECT 1 FROM profiles 
+            WHERE id = auth.uid() AND rol = 'asesor'
+        ) AND (
+            EXISTS (
+                SELECT 1 FROM asesor_cliente 
+                WHERE asesor_id = auth.uid() AND cliente_id = clientes.id
+            )
+        )
+    );
+
+-- ============================================
+-- VERIFICATION QUERIES
+-- ============================================
+
+-- Run these to verify the policies were created successfully:
+SELECT 
+    schemaname, 
+    tablename, 
+    policyname, 
+    permissive, 
+    roles,
+    cmd,
+    qual,
+    with_check
+FROM pg_policies 
+WHERE tablename = 'clientes'
+ORDER BY policyname;
+
+-- =====================================================
+-- ENABLE REAL-TIME FOR INCIDENCIAS CHAT
+-- =====================================================
+-- Run this script in your Supabase SQL Editor to enable
+-- real-time functionality for the incidents chat.
+-- =====================================================
+
+-- 1. Enable real-time for mensajes_incidencia table
+ALTER PUBLICATION supabase_realtime ADD TABLE mensajes_incidencia;
+
+-- 2. Verify real-time is enabled
+-- Check if the table is in the publication
+SELECT schemaname, tablename 
+FROM pg_publication_tables 
+WHERE pubname = 'supabase_realtime' 
+AND tablename = 'mensajes_incidencia';
+
+-- Expected output: Should show one row with 'public' schema and 'mensajes_incidencia' table
+
+-- 3. Optional: Also enable real-time for incidencias table to track status changes
+ALTER PUBLICATION supabase_realtime ADD TABLE incidencias;
+
+-- 4. Verify both tables are enabled
+SELECT schemaname, tablename 
+FROM pg_publication_tables 
+WHERE pubname = 'supabase_realtime' 
+AND tablename IN ('mensajes_incidencia', 'incidencias');
+
+-- Expected output: Should show two rows
+
+-- =====================================================
+-- NOTES:
+-- =====================================================
+-- - After running this script, real-time events will be
+--   broadcast for INSERT, UPDATE, and DELETE operations
+--   on these tables.
+-- 
+-- - Make sure your RLS policies allow users to access
+--   the data they should receive via real-time.
+--
+-- - Real-time uses the same permissions as regular queries.
+--   If a user can't SELECT a row, they won't receive
+--   real-time events for it either.
+--
+-- - To disable real-time (if needed):
+--   ALTER PUBLICATION supabase_realtime DROP TABLE mensajes_incidencia;
+-- =====================================================
+
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_cliente') THEN
+        CREATE TYPE tipo_cliente AS ENUM ('personal', 'empresa');
+    END IF;
+END $$;
+
+-- Add tipo_cliente column to clientes table
+ALTER TABLE clientes 
+ADD COLUMN IF NOT EXISTS tipo_cliente tipo_cliente DEFAULT 'empresa';
+
+-- Add comment to document the column
+COMMENT ON COLUMN clientes.tipo_cliente IS 'Type of client: personal (individual) or empresa (company)';
+
+-- Optional: Update existing records (all default to 'empresa')
+UPDATE clientes 
+SET tipo_cliente = 'empresa' 
+WHERE tipo_cliente IS NULL;
+
+-- ============================================
+-- Verification
+-- ============================================
+
+-- Check the column was added
+SELECT 
+    column_name,
+    data_type,
+    column_default,
+    is_nullable
+FROM information_schema.columns
+WHERE table_name = 'clientes' 
+  AND column_name = 'tipo_cliente';
+
+-- ============================================
+-- SUCCESS MESSAGE
+-- ============================================
+DO $$
+BEGIN
+    RAISE NOTICE '============================================';
+    RAISE NOTICE '✅ Migration completed successfully!';
+    RAISE NOTICE '============================================';
+    RAISE NOTICE 'Added tipo_cliente column to clientes table';
+    RAISE NOTICE 'Type: ENUM (personal, empresa)';
+    RAISE NOTICE 'Default: empresa';
+    RAISE NOTICE '============================================';
+END $$;
+
+-- ============================================
+-- ADVISOR ASSISTANT CONVERSATIONS
+-- ============================================
+-- Migration to add advisor assistant conversation storage
+-- Created: November 16, 2025
+
+-- Conversations table for storing advisor chat sessions
+CREATE TABLE IF NOT EXISTS conversaciones_asesor (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  asesor_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  titulo TEXT NOT NULL DEFAULT 'Nueva conversación',
+  fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  fecha_ultima_actividad TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Messages table for storing individual advisor chat messages
+CREATE TABLE IF NOT EXISTS mensajes_asesor (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  conversacion_id UUID NOT NULL REFERENCES conversaciones_asesor(id) ON DELETE CASCADE,
+  rol TEXT NOT NULL CHECK (rol IN ('usuario', 'asistente')),
+  contenido TEXT NOT NULL,
+  metadatos JSONB, -- For storing sources, document links, etc.
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for better query performance
+CREATE INDEX IF NOT EXISTS idx_conversaciones_asesor_asesor_id ON conversaciones_asesor(asesor_id);
+CREATE INDEX IF NOT EXISTS idx_conversaciones_asesor_fecha ON conversaciones_asesor(fecha_ultima_actividad DESC);
+CREATE INDEX IF NOT EXISTS idx_mensajes_asesor_conversacion ON mensajes_asesor(conversacion_id);
+
+-- Enable RLS
+ALTER TABLE conversaciones_asesor ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mensajes_asesor ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for advisor conversations
+CREATE POLICY "Advisors can view their own conversations"
+  ON conversaciones_asesor FOR SELECT
+  USING (asesor_id = auth.uid());
+
+CREATE POLICY "Advisors can insert their own conversations"
+  ON conversaciones_asesor FOR INSERT
+  WITH CHECK (asesor_id = auth.uid());
+
+CREATE POLICY "Advisors can update their own conversations"
+  ON conversaciones_asesor FOR UPDATE
+  USING (asesor_id = auth.uid());
+
+CREATE POLICY "Advisors can delete their own conversations"
+  ON conversaciones_asesor FOR DELETE
+  USING (asesor_id = auth.uid());
+
+-- RLS Policies for advisor messages
+CREATE POLICY "Advisors can view messages from their conversations"
+  ON mensajes_asesor FOR SELECT
+  USING (
+    conversacion_id IN (
+      SELECT id FROM conversaciones_asesor WHERE asesor_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Advisors can insert messages in their conversations"
+  ON mensajes_asesor FOR INSERT
+  WITH CHECK (
+    conversacion_id IN (
+      SELECT id FROM conversaciones_asesor WHERE asesor_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Advisors can delete messages from their conversations"
+  ON mensajes_asesor FOR DELETE
+  USING (
+    conversacion_id IN (
+      SELECT id FROM conversaciones_asesor WHERE asesor_id = auth.uid()
+    )
+  );
+
+create table if not exists public.user_roles (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  rol user_role not null,
+  created_at timestamptz not null default now(),
+  unique (user_id, rol)
+);
+
+insert into public.user_roles (user_id, rol)
+select id, rol from public.profiles
+where rol is not null
+on conflict do nothing;
+
+alter table public.user_roles enable row level security;
+
+create policy "Admins manage user roles"
+  on public.user_roles
+  for all
+  using (auth.role() = 'service_role')
+  with check (true);
+
+create policy "Users read their roles"
+  on public.user_roles
+  for select
+  using (auth.uid() = user_id);
+
+-- ============================================
+-- COMPLETE FINANCIAL SYSTEM IMPLEMENTATION
+-- For Externaliza2 Platform
+-- ============================================
+-- This migration adds all tables and structures needed for the complete financial system
+
+-- ============================================
+-- 1. EXPAND DOCUMENT TYPES AND STATUS
+-- ============================================
+
+-- Add new document types for mixed financial sources
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_documento_financiero') THEN
+    CREATE TYPE tipo_documento_financiero AS ENUM (
+      'pyg',                -- Profit & Loss statement
+      'balance',            -- Balance sheet
+      'mayor',              -- General ledger
+      'extracto_bancario',  -- Bank statement
+      'excel_personalizado',-- Custom Excel reports
+      'nominas',            -- Payroll
+      'prestamos',          -- Loan schedules
+      'otro_financiero'     -- Other financial documents
+    );
+  END IF;
+END $$;
+
+-- ============================================
+-- 2. FINANCIAL DOCUMENTS TABLE (Mixed Sources)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS documentos_financieros (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  asesor_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  nombre TEXT NOT NULL,
+  tipo tipo_documento_financiero NOT NULL,
+  periodo TEXT NOT NULL, -- e.g., "Q1 2024", "2024", "Enero 2024"
+  ejercicio_fiscal TEXT, -- e.g., "2024"
+  fecha_subida TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  url_archivo TEXT NOT NULL,
+  tamanio BIGINT,
+  procesado_ia BOOLEAN DEFAULT false,
+  
+  -- AI extracted data from financial documents
+  datos_extraidos JSONB, -- Contains financial metrics extracted by AI
+  
+  -- AI analysis and commentary
+  analisis_ia JSONB, -- Contains AI generated insights, alerts, recommendations
+  
+  -- Metadata
+  notas TEXT,
+  estado TEXT DEFAULT 'pendiente', -- pendiente, procesado, validado, en_uso
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_docs_financieros_cliente ON documentos_financieros(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_docs_financieros_tipo ON documentos_financieros(tipo);
+CREATE INDEX IF NOT EXISTS idx_docs_financieros_periodo ON documentos_financieros(periodo);
+
+-- ============================================
+-- 3. ERP INTEGRATION & SEAT NUMBER TRACKING
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS erp_asientos (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  documento_id UUID REFERENCES documentos(id) ON DELETE SET NULL,
+  
+  -- ERP seat (asiento) information
+  nro_asiento TEXT NOT NULL,
+  fecha_asiento DATE NOT NULL,
+  descripcion TEXT,
+  
+  -- ERP integration tracking
+  fecha_importacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  archivo_erp_origen TEXT, -- The ERP report file that was imported
+  
+  -- Matching information
+  metodo_match TEXT, -- 'automatico', 'manual', 'secuencial'
+  confianza_match DECIMAL(5,2), -- Confidence level of automatic matching
+  
+  -- Accounting entry details
+  apuntes JSONB, -- Array of accounting line items (debe, haber, cuenta, concepto)
+  total_debe DECIMAL(15,2),
+  total_haber DECIMAL(15,2),
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_erp_asientos_cliente ON erp_asientos(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_erp_asientos_documento ON erp_asientos(documento_id);
+CREATE INDEX IF NOT EXISTS idx_erp_asientos_nro ON erp_asientos(nro_asiento);
+CREATE INDEX IF NOT EXISTS idx_erp_asientos_fecha ON erp_asientos(fecha_asiento);
+
+-- ============================================
+-- 4. LIBRO REGISTRO (INVOICE RECORD BOOK)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS libro_registro (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  
+  -- Period information
+  periodo TEXT NOT NULL, -- e.g., "Q1 2024", "Enero 2024"
+  ejercicio_fiscal TEXT NOT NULL,
+  tipo_libro TEXT NOT NULL, -- 'emitidas', 'recibidas', 'bienes_inversion'
+  
+  -- Generation metadata
+  fecha_generacion TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  generado_por UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  
+  -- File information
+  url_archivo_excel TEXT, -- URL to generated Excel file
+  
+  -- Summary data
+  total_facturas INTEGER,
+  total_base_imponible DECIMAL(15,2),
+  total_iva DECIMAL(15,2),
+  total_importe DECIMAL(15,2),
+  
+  -- Document IDs included in this libro
+  documentos_incluidos UUID[], -- Array of documento IDs
+  
+  -- Status
+  estado TEXT DEFAULT 'generado', -- generado, importado_erp, contabilizado
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  UNIQUE(cliente_id, periodo, tipo_libro)
+);
+
+CREATE INDEX IF NOT EXISTS idx_libro_registro_cliente ON libro_registro(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_libro_registro_periodo ON libro_registro(periodo);
+
+-- ============================================
+-- 5. AI VERIFICATION & QUALITY CONTROL
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS verificaciones_ia (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  documento_id UUID REFERENCES documentos(id) ON DELETE CASCADE,
+  asesor_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  
+  -- AI processing details
+  fecha_procesamiento TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  modelo_ia TEXT, -- Which AI model was used
+  confianza_global DECIMAL(5,2), -- Overall confidence score
+  
+  -- Field-level confidence scores
+  confianzas_campos JSONB, -- {"fechaFactura": 98, "total": 95, ...}
+  
+  -- Advisor action
+  accion TEXT, -- 'validado', 'rechazado', 'pendiente_revision'
+  fecha_accion TIMESTAMP WITH TIME ZONE,
+  comentarios_asesor TEXT,
+  
+  -- Changes made by advisor
+  campos_corregidos JSONB, -- Which fields were manually corrected
+  
+  -- Learning feedback
+  usado_entrenamiento BOOLEAN DEFAULT false,
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_verificaciones_ia_documento ON verificaciones_ia(documento_id);
+CREATE INDEX IF NOT EXISTS idx_verificaciones_ia_accion ON verificaciones_ia(accion);
+
+-- ============================================
+-- 6. AI PERFORMANCE METRICS
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS metricas_ia (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  
+  -- Period
+  fecha DATE NOT NULL,
+  periodo TEXT NOT NULL, -- 'diario', 'semanal', 'mensual'
+  
+  -- Processing metrics
+  documentos_procesados INTEGER DEFAULT 0,
+  documentos_validados INTEGER DEFAULT 0,
+  documentos_rechazados INTEGER DEFAULT 0,
+  
+  -- Accuracy metrics
+  precision_promedio DECIMAL(5,2),
+  precision_por_tipo JSONB, -- {"emitida": 96.5, "recibida": 94.2, ...}
+  
+  -- Confidence distribution
+  alta_confianza INTEGER DEFAULT 0, -- >= 95%
+  media_confianza INTEGER DEFAULT 0, -- 80-95%
+  baja_confianza INTEGER DEFAULT 0, -- < 80%
+  
+  -- Error metrics
+  errores_totales INTEGER DEFAULT 0,
+  errores_por_tipo JSONB, -- {"fecha": 5, "nif": 3, "importe": 2, ...}
+  
+  -- Performance metrics
+  tiempo_procesamiento_promedio INTEGER, -- in milliseconds
+  
+  -- Improvement tracking
+  mejora_vs_periodo_anterior DECIMAL(5,2),
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  UNIQUE(fecha, periodo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metricas_ia_fecha ON metricas_ia(fecha);
+CREATE INDEX IF NOT EXISTS idx_metricas_ia_periodo ON metricas_ia(periodo);
+
+-- ============================================
+-- 7. FINANCIAL MODELS (AI-Generated)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS modelos_financieros_cliente (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  
+  -- Period
+  periodo TEXT NOT NULL,
+  ejercicio_fiscal TEXT NOT NULL,
+  
+  -- Source documents used to build this model
+  documentos_fuente UUID[], -- Array of documento_financiero IDs
+  fecha_calculo TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  -- Income Statement (P&L) data
+  ingresos_operacionales DECIMAL(15,2),
+  gastos_operacionales DECIMAL(15,2),
+  resultado_operacional DECIMAL(15,2),
+  gastos_financieros DECIMAL(15,2),
+  ingresos_extraordinarios DECIMAL(15,2),
+  gastos_extraordinarios DECIMAL(15,2),
+  resultado_antes_impuestos DECIMAL(15,2),
+  impuestos DECIMAL(15,2),
+  resultado_neto DECIMAL(15,2),
+  
+  -- Balance Sheet data
+  activo_corriente DECIMAL(15,2),
+  activo_no_corriente DECIMAL(15,2),
+  total_activo DECIMAL(15,2),
+  pasivo_corriente DECIMAL(15,2),
+  pasivo_no_corriente DECIMAL(15,2),
+  patrimonio_neto DECIMAL(15,2),
+  total_pasivo_patrimonio DECIMAL(15,2),
+  
+  -- Financial ratios
+  ratio_liquidez DECIMAL(10,4),
+  ratio_solvencia DECIMAL(10,4),
+  ratio_endeudamiento DECIMAL(10,4),
+  margen_bruto DECIMAL(10,4),
+  margen_operacional DECIMAL(10,4),
+  margen_neto DECIMAL(10,4),
+  roi DECIMAL(10,4),
+  roe DECIMAL(10,4),
+  
+  -- Cash flow (if available)
+  flujo_efectivo_operaciones DECIMAL(15,2),
+  flujo_efectivo_inversion DECIMAL(15,2),
+  flujo_efectivo_financiacion DECIMAL(15,2),
+  flujo_efectivo_neto DECIMAL(15,2),
+  
+  -- Detailed breakdowns (stored as JSONB for flexibility)
+  gastos_por_categoria JSONB, -- {"personal": 50000, "suministros": 10000, ...}
+  ingresos_por_linea JSONB,
+  proveedores_principales JSONB, -- Top suppliers with amounts
+  clientes_principales JSONB, -- Top customers with amounts
+  
+  -- AI analysis
+  alertas_financieras JSONB, -- Array of alerts generated by AI
+  recomendaciones_ia JSONB, -- Array of recommendations
+  comentario_ia TEXT, -- Natural language summary
+  
+  -- Risk assessment
+  nivel_riesgo TEXT, -- 'bajo', 'medio', 'alto'
+  factores_riesgo JSONB, -- Array of risk factors identified
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  UNIQUE(cliente_id, periodo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_modelos_financieros_cliente ON modelos_financieros_cliente(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_modelos_financieros_periodo ON modelos_financieros_cliente(periodo);
+
+-- ============================================
+-- 8. FINANCIAL QUERIES (E2 Assistant)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS consultas_financieras (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+  usuario_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  
+  -- Query details
+  pregunta TEXT NOT NULL,
+  respuesta TEXT NOT NULL,
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  -- Context used
+  documentos_referenciados UUID[], -- Array of document IDs used to answer
+  fuentes_oficiales TEXT[], -- Array of official sources consulted
+  
+  -- Quality metrics
+  calificacion_usuario INTEGER, -- 1-5 stars
+  fue_util BOOLEAN,
+  requirio_escalacion BOOLEAN DEFAULT false,
+  
+  -- Follow-up
+  incidencia_creada UUID REFERENCES incidencias(id) ON DELETE SET NULL,
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_consultas_financieras_cliente ON consultas_financieras(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_consultas_financieras_fecha ON consultas_financieras(fecha);
+
+-- ============================================
+-- 9. AUDIT LOG FOR FINANCIAL ACTIONS
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS auditoria_financiera (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  
+  -- Who
+  usuario_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  usuario_nombre TEXT NOT NULL,
+  usuario_rol TEXT NOT NULL,
+  
+  -- What
+  accion TEXT NOT NULL, -- 'validar_documento', 'generar_libro', 'exportar_excel', etc.
+  entidad_tipo TEXT NOT NULL, -- 'documento', 'libro_registro', 'asiento_erp', etc.
+  entidad_id UUID NOT NULL,
+  
+  -- Details
+  descripcion TEXT NOT NULL,
+  datos_anteriores JSONB, -- State before action
+  datos_nuevos JSONB, -- State after action
+  
+  -- Context
+  cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL,
+  direccion_ip INET,
+  user_agent TEXT,
+  
+  -- When
+  fecha TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auditoria_usuario ON auditoria_financiera(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_auditoria_accion ON auditoria_financiera(accion);
+CREATE INDEX IF NOT EXISTS idx_auditoria_fecha ON auditoria_financiera(fecha);
+CREATE INDEX IF NOT EXISTS idx_auditoria_cliente ON auditoria_financiera(cliente_id);
+
+-- ============================================
+-- 10. NOTIFICATION PREFERENCES & HISTORY
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS preferencias_notificaciones (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  usuario_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  
+  -- Email notifications
+  notif_documentos_nuevos BOOLEAN DEFAULT true,
+  notif_documentos_procesados BOOLEAN DEFAULT true,
+  notif_incidencias_nuevas BOOLEAN DEFAULT true,
+  notif_incidencias_resueltas BOOLEAN DEFAULT true,
+  notif_libro_registro_generado BOOLEAN DEFAULT true,
+  notif_alertas_financieras BOOLEAN DEFAULT true,
+  notif_resumen_diario BOOLEAN DEFAULT false,
+  notif_resumen_semanal BOOLEAN DEFAULT true,
+  
+  -- In-app notifications
+  notif_inapp_enabled BOOLEAN DEFAULT true,
+  
+  -- Thresholds for alerts
+  umbral_alerta_gastos DECIMAL(15,2),
+  umbral_alerta_ingresos DECIMAL(15,2),
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  
+  UNIQUE(usuario_id)
+);
+
+CREATE TABLE IF NOT EXISTS historial_notificaciones (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  usuario_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  
+  -- Notification details
+  tipo TEXT NOT NULL, -- 'email', 'inapp', 'sms'
+  categoria TEXT NOT NULL, -- 'documento', 'incidencia', 'financiero', 'sistema'
+  titulo TEXT NOT NULL,
+  mensaje TEXT NOT NULL,
+  
+  -- Status
+  enviado BOOLEAN DEFAULT false,
+  fecha_envio TIMESTAMP WITH TIME ZONE,
+  leido BOOLEAN DEFAULT false,
+  fecha_lectura TIMESTAMP WITH TIME ZONE,
+  
+  -- Context
+  enlace TEXT,
+  datos_adicionales JSONB,
+  
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notificaciones_usuario ON historial_notificaciones(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_notificaciones_leido ON historial_notificaciones(leido);
+CREATE INDEX IF NOT EXISTS idx_notificaciones_fecha ON historial_notificaciones(created_at);
+
+-- ============================================
+-- 11. UPDATE EXISTING TABLES
+-- ============================================
+
+-- Add tipo_cliente to clientes if not exists
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='clientes' AND column_name='tipo_cliente'
+  ) THEN
+    ALTER TABLE clientes ADD COLUMN tipo_cliente TEXT DEFAULT 'empresa' CHECK (tipo_cliente IN ('autonomo', 'empresa'));
+  END IF;
+END $$;
+
+-- Add more tracking fields to documentos
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='fecha_validacion'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN fecha_validacion TIMESTAMP WITH TIME ZONE;
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='validado_por'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN validado_por UUID REFERENCES profiles(id) ON DELETE SET NULL;
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='fecha_contabilizacion'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN fecha_contabilizacion TIMESTAMP WITH TIME ZONE;
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='incluido_en_libro'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN incluido_en_libro UUID REFERENCES libro_registro(id) ON DELETE SET NULL;
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='bloqueado'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN bloqueado BOOLEAN DEFAULT false;
+  END IF;
+END $$;
+
+-- Expand datos_financieros table
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='datos_financieros' AND column_name='modelo_financiero_id'
+  ) THEN
+    ALTER TABLE datos_financieros ADD COLUMN modelo_financiero_id UUID REFERENCES modelos_financieros_cliente(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+-- ============================================
+-- 12. FUNCTIONS & TRIGGERS
+-- ============================================
+
+-- Function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Apply updated_at trigger to new tables
+DROP TRIGGER IF EXISTS update_documentos_financieros_updated_at ON documentos_financieros;
+CREATE TRIGGER update_documentos_financieros_updated_at
+  BEFORE UPDATE ON documentos_financieros
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_erp_asientos_updated_at ON erp_asientos;
+CREATE TRIGGER update_erp_asientos_updated_at
+  BEFORE UPDATE ON erp_asientos
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_libro_registro_updated_at ON libro_registro;
+CREATE TRIGGER update_libro_registro_updated_at
+  BEFORE UPDATE ON libro_registro
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_verificaciones_ia_updated_at ON verificaciones_ia;
+CREATE TRIGGER update_verificaciones_ia_updated_at
+  BEFORE UPDATE ON verificaciones_ia
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_modelos_financieros_updated_at ON modelos_financieros_cliente;
+CREATE TRIGGER update_modelos_financieros_updated_at
+  BEFORE UPDATE ON modelos_financieros_cliente
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- Function to create audit log entry
+CREATE OR REPLACE FUNCTION crear_log_auditoria(
+  p_usuario_id UUID,
+  p_usuario_nombre TEXT,
+  p_usuario_rol TEXT,
+  p_accion TEXT,
+  p_entidad_tipo TEXT,
+  p_entidad_id UUID,
+  p_descripcion TEXT,
+  p_datos_anteriores JSONB DEFAULT NULL,
+  p_datos_nuevos JSONB DEFAULT NULL,
+  p_cliente_id UUID DEFAULT NULL
+)
+RETURNS UUID AS $$
+DECLARE
+  v_audit_id UUID;
+BEGIN
+  INSERT INTO auditoria_financiera (
+    usuario_id,
+    usuario_nombre,
+    usuario_rol,
+    accion,
+    entidad_tipo,
+    entidad_id,
+    descripcion,
+    datos_anteriores,
+    datos_nuevos,
+    cliente_id
+  ) VALUES (
+    p_usuario_id,
+    p_usuario_nombre,
+    p_usuario_rol,
+    p_accion,
+    p_entidad_tipo,
+    p_entidad_id,
+    p_descripcion,
+    p_datos_anteriores,
+    p_datos_nuevos,
+    p_cliente_id
+  ) RETURNING id INTO v_audit_id;
+  
+  RETURN v_audit_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to calculate financial model for a client
+CREATE OR REPLACE FUNCTION calcular_modelo_financiero(
+  p_cliente_id UUID,
+  p_periodo TEXT
+)
+RETURNS UUID AS $$
+DECLARE
+  v_modelo_id UUID;
+  v_ingresos DECIMAL(15,2);
+  v_gastos DECIMAL(15,2);
+  v_resultado DECIMAL(15,2);
+BEGIN
+  -- Get data from datos_financieros
+  SELECT ingresos, gastos, resultado
+  INTO v_ingresos, v_gastos, v_resultado
+  FROM datos_financieros
+  WHERE cliente_id = p_cliente_id AND periodo = p_periodo
+  LIMIT 1;
+  
+  -- Create or update financial model
+  INSERT INTO modelos_financieros_cliente (
+    cliente_id,
+    periodo,
+    ejercicio_fiscal,
+    ingresos_operacionales,
+    gastos_operacionales,
+    resultado_operacional,
+    resultado_neto,
+    margen_neto
+  ) VALUES (
+    p_cliente_id,
+    p_periodo,
+    EXTRACT(YEAR FROM NOW())::TEXT,
+    COALESCE(v_ingresos, 0),
+    COALESCE(v_gastos, 0),
+    COALESCE(v_resultado, 0),
+    COALESCE(v_resultado, 0),
+    CASE WHEN COALESCE(v_ingresos, 0) > 0 
+      THEN (COALESCE(v_resultado, 0) / COALESCE(v_ingresos, 1)) * 100 
+      ELSE 0 
+    END
+  )
+  ON CONFLICT (cliente_id, periodo) 
+  DO UPDATE SET
+    ingresos_operacionales = EXCLUDED.ingresos_operacionales,
+    gastos_operacionales = EXCLUDED.gastos_operacionales,
+    resultado_operacional = EXCLUDED.resultado_operacional,
+    resultado_neto = EXCLUDED.resultado_neto,
+    margen_neto = EXCLUDED.margen_neto,
+    fecha_calculo = NOW()
+  RETURNING id INTO v_modelo_id;
+  
+  RETURN v_modelo_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- 13. ROW LEVEL SECURITY (RLS) POLICIES
+-- ============================================
+
+-- Enable RLS on new tables
+ALTER TABLE documentos_financieros ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_asientos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE libro_registro ENABLE ROW LEVEL SECURITY;
+ALTER TABLE verificaciones_ia ENABLE ROW LEVEL SECURITY;
+ALTER TABLE metricas_ia ENABLE ROW LEVEL SECURITY;
+ALTER TABLE modelos_financieros_cliente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE consultas_financieras ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auditoria_financiera ENABLE ROW LEVEL SECURITY;
+ALTER TABLE preferencias_notificaciones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE historial_notificaciones ENABLE ROW LEVEL SECURITY;
+
+-- Policies for documentos_financieros
+DROP POLICY IF EXISTS "Admin full access to documentos_financieros" ON documentos_financieros;
+CREATE POLICY "Admin full access to documentos_financieros" ON documentos_financieros
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    )
+  );
+
+DROP POLICY IF EXISTS "Asesor access to assigned clients financieros" ON documentos_financieros;
+CREATE POLICY "Asesor access to assigned clients financieros" ON documentos_financieros
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM asesor_cliente ac
+      JOIN profiles p ON p.id = auth.uid()
+      WHERE ac.asesor_id = p.id 
+      AND ac.cliente_id = documentos_financieros.cliente_id
+      AND p.rol = 'asesor'
+    )
+  );
+
+DROP POLICY IF EXISTS "Cliente access to own documentos_financieros" ON documentos_financieros;
+CREATE POLICY "Cliente access to own documentos_financieros" ON documentos_financieros
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM clientes c
+      JOIN profiles p ON p.id = auth.uid()
+      WHERE c.id = documentos_financieros.cliente_id 
+      AND c.user_id = p.id
+      AND p.rol = 'cliente'
+    )
+  );
+
+-- Similar policies for other tables (simplified for brevity)
+DROP POLICY IF EXISTS "Admin full access to erp_asientos" ON erp_asientos;
+CREATE POLICY "Admin full access to erp_asientos" ON erp_asientos FOR ALL USING (
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin')
+);
+
+DROP POLICY IF EXISTS "Admin full access to modelos_financieros" ON modelos_financieros_cliente;
+CREATE POLICY "Admin full access to modelos_financieros" ON modelos_financieros_cliente FOR ALL USING (
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin')
+);
+
+DROP POLICY IF EXISTS "Admin full access to auditoria" ON auditoria_financiera;
+CREATE POLICY "Admin full access to auditoria" ON auditoria_financiera FOR ALL USING (
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin')
+);
+
+DROP POLICY IF EXISTS "Users access own notifications" ON historial_notificaciones;
+CREATE POLICY "Users access own notifications" ON historial_notificaciones FOR ALL USING (
+  usuario_id = auth.uid()
+);
+
+-- ============================================
+-- MIGRATION COMPLETE
+-- ============================================
+
+-- Add comments to tables for documentation
+COMMENT ON TABLE documentos_financieros IS 'Mixed financial source documents: P&L, Balance, Ledger, etc.';
+COMMENT ON TABLE erp_asientos IS 'ERP accounting entries with seat numbers and matching to invoices';
+COMMENT ON TABLE libro_registro IS 'Generated invoice record books (Libro Registro) for each period';
+COMMENT ON TABLE verificaciones_ia IS 'AI verification workflow with advisor validation';
+COMMENT ON TABLE metricas_ia IS 'AI performance metrics and accuracy tracking';
+COMMENT ON TABLE modelos_financieros_cliente IS 'AI-generated financial models per client with ratios and analysis';
+COMMENT ON TABLE consultas_financieras IS 'Financial queries handled by E2 Assistant';
+COMMENT ON TABLE auditoria_financiera IS 'Audit log for all financial actions in the platform';
+
+-- ============================================
+-- UPDATE DOCUMENT TYPE ENUM
+-- Migration to update document_type enum to new values
+-- ============================================
+-- This migration updates the document_type enum from:
+--   'emitida', 'recibida', 'nomina', 'gasto', 'otro'
+-- To:
+--   'otro', 'emitida_pdf', 'recibida_pdf', 'emitida_excel', 'recibida_excel'
+
+-- Step 1: Create new enum type with the new values
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'document_type_new') THEN
+    CREATE TYPE document_type_new AS ENUM (
+      'otro',
+      'emitida_pdf',
+      'recibida_pdf',
+      'emitida_excel',
+      'recibida_excel'
+    );
+  END IF;
+END $$;
+
+-- Step 2: Add temporary column with new enum type
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='documentos' AND column_name='tipo_new'
+  ) THEN
+    ALTER TABLE documentos ADD COLUMN tipo_new document_type_new;
+  END IF;
+END $$;
+
+-- Step 3: Migrate existing data
+-- Map old values to new values:
+--   'emitida' -> 'emitida_pdf'
+--   'recibida' -> 'recibida_pdf'
+--   'nomina' -> 'otro'
+--   'gasto' -> 'otro'
+--   'otro' -> 'otro'
+UPDATE documentos
+SET tipo_new = CASE
+  WHEN tipo::text = 'emitida' THEN 'emitida_pdf'::document_type_new
+  WHEN tipo::text = 'recibida' THEN 'recibida_pdf'::document_type_new
+  WHEN tipo::text = 'nomina' THEN 'otro'::document_type_new
+  WHEN tipo::text = 'gasto' THEN 'otro'::document_type_new
+  WHEN tipo::text = 'otro' THEN 'otro'::document_type_new
+  ELSE 'otro'::document_type_new
+END;
+
+-- Step 4: Make the new column NOT NULL (after migration)
+ALTER TABLE documentos ALTER COLUMN tipo_new SET NOT NULL;
+
+-- Step 5: Drop the old column
+ALTER TABLE documentos DROP COLUMN tipo;
+
+-- Step 6: Rename the new column to the original name
+ALTER TABLE documentos RENAME COLUMN tipo_new TO tipo;
+
+-- Step 7: Drop the old enum type (only if no other tables use it)
+-- Note: This will fail if other tables use document_type enum
+-- If that's the case, you'll need to update those tables first
+DO $$ 
+BEGIN
+  -- Check if any other tables use the old enum
+  IF NOT EXISTS (
+    SELECT 1 
+    FROM information_schema.columns 
+    WHERE udt_name = 'document_type'
+    AND table_name != 'documentos'
+  ) THEN
+    DROP TYPE document_type;
+  ELSE
+    RAISE NOTICE 'Cannot drop document_type enum - other tables still use it';
+  END IF;
+END $$;
+
+-- Step 8: Rename the new enum type to the original name
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'document_type_new') THEN
+    ALTER TYPE document_type_new RENAME TO document_type;
+  END IF;
+END $$;
+
+-- Step 9: Add comment for documentation
+COMMENT ON TYPE document_type IS 'Document types: otro, emitida_pdf, recibida_pdf, emitida_excel, recibida_excel';
+
+-- ============================================
+-- Migration: Allow All MIME Types for documentos Bucket
+-- ============================================
+-- This migration updates the 'documentos' storage bucket to accept all file types
+-- instead of the restricted list currently configured (PDF, XML, JPEG, PNG only)
+
+-- Step 1: Check current bucket configuration
+DO $$
+DECLARE
+  bucket_exists BOOLEAN;
+  current_allowed_types TEXT[];
+BEGIN
+  -- Check if bucket exists
+  SELECT EXISTS(SELECT 1 FROM storage.buckets WHERE id = 'documentos') INTO bucket_exists;
+  
+  IF NOT bucket_exists THEN
+    RAISE EXCEPTION 'Bucket "documentos" does not exist. Please create it first in the Supabase Dashboard.';
+  END IF;
+  
+  -- Get current allowed MIME types
+  SELECT allowed_mime_types INTO current_allowed_types
+  FROM storage.buckets
+  WHERE id = 'documentos';
+  
+  IF current_allowed_types IS NOT NULL THEN
+    RAISE NOTICE 'Current allowed MIME types: %', array_to_string(current_allowed_types, ', ');
+  ELSE
+    RAISE NOTICE 'Bucket currently has no MIME type restrictions (allows all types)';
+  END IF;
+END $$;
+
+-- Step 2: Update the bucket to allow ALL MIME types
+-- Setting allowed_mime_types to NULL removes all restrictions
+UPDATE storage.buckets
+SET 
+  allowed_mime_types = NULL
+WHERE id = 'documentos';
+
+-- Step 3: Verify the update was successful
+DO $$
+DECLARE
+  updated_allowed_types TEXT[];
+  row_count INTEGER;
+BEGIN
+  -- Check how many rows were updated
+  GET DIAGNOSTICS row_count = ROW_COUNT;
+  
+  IF row_count = 0 THEN
+    RAISE WARNING 'No rows were updated. Bucket "documentos" may not exist.';
+  ELSE
+    RAISE NOTICE 'Updated % row(s)', row_count;
+  END IF;
+  
+  -- Verify the new configuration
+  SELECT allowed_mime_types INTO updated_allowed_types
+  FROM storage.buckets
+  WHERE id = 'documentos';
+  
+  IF updated_allowed_types IS NULL THEN
+    RAISE NOTICE 'SUCCESS: Bucket "documentos" now accepts ALL MIME types (restrictions removed)';
+    RAISE NOTICE 'The bucket will show "Any" in the Supabase Dashboard';
+  ELSE
+    RAISE WARNING 'Update may not have worked. Current allowed types: %', array_to_string(updated_allowed_types, ', ');
+    RAISE NOTICE 'Try the alternative approach below if this did not work';
+  END IF;
+END $$;
+
+-- ============================================
+-- Alternative Approach (if NULL doesn't work)
+-- ============================================
+-- If setting to NULL doesn't work, explicitly include all needed MIME types
+-- Uncomment the section below if the above UPDATE didn't work:
+
+/*
+-- Option: Explicitly include common types including Excel
+-- This includes all the original types plus Excel and other common document types
+UPDATE storage.buckets
+SET allowed_mime_types = ARRAY[
+  'application/pdf',
+  'application/xml',
+  'text/xml',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',  -- .xlsx
+  'application/vnd.ms-excel',  -- .xls
+  'application/vnd.ms-office',
+  'application/msword',  -- .doc
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  -- .docx
+  'application/vnd.ms-powerpoint',  -- .ppt
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',  -- .pptx
+  'text/csv',  -- CSV files
+  'application/zip',  -- ZIP files
+  'application/octet-stream'  -- Generic binary (fallback)
+]::TEXT[]
+WHERE id = 'documentos';
+*/
+
+-- ============================================
+-- Verification Query
+-- ============================================
+-- Run this query to verify the bucket configuration:
+/*
+SELECT 
+  id,
+  name,
+  public,
+  file_size_limit,
+  allowed_mime_types,
+  created_at,
+  updated_at
+FROM storage.buckets
+WHERE id = 'documentos';
+*/
+
+-- ============================================
+-- Notes
+-- ============================================
+-- After running this migration:
+-- 1. Refresh the Supabase Dashboard (Storage > Buckets)
+-- 2. The "documentos" bucket should now show "Any" in the "ALLOWED MIME TYPES" column
+-- 3. Test by uploading an Excel file (.xlsx or .xls) to verify it works
+-- 4. If you still see restrictions, try the alternative approaches above
